@@ -1,5 +1,6 @@
 import { gitRepository } from "../repositories/gitRepository.mjs";
 import { activityRepository } from "../repositories/activityRepository.mjs";
+import { organizationMemberRepository } from "../repositories/organizationMemberRepository.mjs";
 import { projectAdminRepository } from "../repositories/projectAdminRepository.mjs";
 import { rbacRepository } from "../repositories/rbacRepository.mjs";
 import { supabaseProjectRepository } from "../repositories/supabaseProjectRepository.mjs";
@@ -39,7 +40,20 @@ export class ProjectAdminService {
   async inviteMember({ body, projectId, user }) {
     const role = normalizeRole(body.role);
     const userEmail = requireEmail(body.email);
+    const project = await supabaseProjectRepository.getProject(projectId);
+    if (!project) {
+      throw new HttpError(404, "Project could not be found.");
+    }
     const authUser = await projectAdminRepository.findAuthUserByEmail(userEmail);
+    await organizationMemberRepository.upsertMember({
+      organizationId: project.organization_id,
+      role: role === "Owner" || role === "Admin" ? role : "Member",
+      userEmail,
+      userId:
+        typeof body.userId === "string"
+          ? body.userId
+          : authUser?.id
+    });
     const member = await projectAdminRepository.upsertMember({
       projectId,
       role,
@@ -60,6 +74,16 @@ export class ProjectAdminService {
         matchedExistingAuthUser: Boolean(authUser)
       }
     });
+    await rbacRepository.recordAuditEvent({
+      action: "Organization.MemberAdded",
+      projectId,
+      user,
+      metadata: {
+        organizationId: project.organization_id,
+        email: userEmail,
+        role
+      }
+    });
     await activityRepository.record({
       action: "User Invited",
       entityId: member.id,
@@ -74,7 +98,16 @@ export class ProjectAdminService {
 
   async changeRole({ body, memberId, projectId, user }) {
     const role = normalizeRole(body.role);
+    const project = await supabaseProjectRepository.getProject(projectId);
     const member = await projectAdminRepository.updateMemberRole(projectId, memberId, role);
+    if (project) {
+      await organizationMemberRepository.upsertMember({
+        organizationId: project.organization_id,
+        role: role === "Owner" || role === "Admin" ? role : "Member",
+        userEmail: member.user_email,
+        userId: member.user_id
+      });
+    }
 
     await rbacRepository.recordAuditEvent({
       action: "Project.RoleChanged",

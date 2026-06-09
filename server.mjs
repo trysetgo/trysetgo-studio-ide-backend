@@ -12,10 +12,14 @@ import { gitService } from "./services/GitService.mjs";
 import { monitoringService } from "./services/MonitoringService.mjs";
 import { projectAdminService } from "./services/ProjectAdminService.mjs";
 import { projectDeletionService } from "./services/ProjectDeletionService.mjs";
+import { migrationExecutionService } from "./schema/MigrationExecutionService.mjs";
+import { schemaVerificationService } from "./schema/SchemaVerificationService.mjs";
+import { platformVerificationSuite } from "./verification/PlatformVerificationSuite.mjs";
 import { activityRepository } from "./repositories/activityRepository.mjs";
 import { commentRepository } from "./repositories/commentRepository.mjs";
 import { presenceRepository } from "./repositories/presenceRepository.mjs";
 import { packageRepository } from "./repositories/packageRepository.mjs";
+import { organizationMemberRepository } from "./repositories/organizationMemberRepository.mjs";
 import { projectAdminRepository } from "./repositories/projectAdminRepository.mjs";
 import { rbacRepository } from "./repositories/rbacRepository.mjs";
 import { getAuthContext, getProjectAwareAuthContext, requireAnyPermission, requirePermission } from "./auth/authContext.mjs";
@@ -216,13 +220,24 @@ async function routeRequest(request, response) {
   }
 
   if (pathname === "/api/organizations" && request.method === "GET") {
-    await requirePermission(request, "Project.Read");
-    sendJson(response, 200, await supabaseProjectRepository.listOrganizations());
+    const context = await requirePermission(request, "Project.Read");
+    const organizations = await supabaseProjectRepository.listOrganizations();
+    if (context.roles.includes("Super Admin")) {
+      sendJson(response, 200, organizations);
+      return;
+    }
+
+    const organizationIds = await organizationMemberRepository.listOrganizationIdsForUser(context.user);
+    sendJson(
+      response,
+      200,
+      organizations.filter((organization) => organizationIds.includes(organization.id))
+    );
     return;
   }
 
   if (pathname === "/api/organizations" && request.method === "POST") {
-    await requirePermission(request, "Project.Write");
+    const context = await requirePermission(request, "Project.Write");
     const body = await readJsonBody(request);
     const now = new Date().toISOString();
     const organization = {
@@ -232,11 +247,19 @@ async function routeRequest(request, response) {
       created_at: body.created_at ?? now
     };
 
-    sendJson(
-      response,
-      201,
-      await supabaseProjectRepository.createOrganization(organization)
-    );
+    const createdOrganization = await supabaseProjectRepository.createOrganization(organization);
+    await organizationMemberRepository.upsertMember({
+      organizationId: createdOrganization.id,
+      role: "Owner",
+      userEmail: context.user.email,
+      userId: context.user.id
+    });
+    await rbacRepository.recordAuditEvent({
+      action: "Organization.MemberAdded",
+      user: context.user,
+      metadata: { organizationId: createdOrganization.id, role: "Owner" }
+    });
+    sendJson(response, 201, createdOrganization);
     return;
   }
 
@@ -323,6 +346,76 @@ async function routeRequest(request, response) {
       requireString(body.kind, "Metric kind"),
       { ...body.metric, projectId }
     ));
+    return;
+  }
+
+  if (pathname === "/api/schema/verify" && request.method === "POST") {
+    const body = await readJsonBody(request, 5 * 1024 * 1024);
+    const projectId = requireString(body.projectId, "projectId");
+    await requirePermission(request, "Project.Read", { projectId });
+    sendJson(
+      response,
+      200,
+      schemaVerificationService.verifyWorkspaceFiles({
+        files: Array.isArray(body.files) ? body.files : [],
+        provider: typeof body.provider === "string" ? body.provider : "Supabase"
+      })
+    );
+    return;
+  }
+
+  if (pathname === "/api/verify" && request.method === "POST") {
+    const body = await readJsonBody(request, 5 * 1024 * 1024);
+    const projectId = requireString(body.projectId, "projectId");
+    await requirePermission(request, "Project.Read", { projectId });
+    sendJson(
+      response,
+      200,
+      platformVerificationSuite.run({
+        files: Array.isArray(body.files) ? body.files : [],
+        projectId
+      })
+    );
+    return;
+  }
+
+  if (pathname === "/api/migrations/apply" && request.method === "POST") {
+    const body = await readJsonBody(request, 1024 * 1024);
+    const projectId = requireString(body.projectId, "projectId");
+    await requirePermission(request, "Project.Write", { projectId });
+    sendJson(
+      response,
+      201,
+      await migrationExecutionService.apply({
+        migrationName: requireString(body.migrationName, "migrationName"),
+        projectId,
+        provider: requireString(body.provider, "provider"),
+        script: requireString(body.script, "script")
+      })
+    );
+    return;
+  }
+
+  if (pathname === "/api/migrations/rollback" && request.method === "POST") {
+    const body = await readJsonBody(request);
+    const projectId = requireString(body.projectId, "projectId");
+    await requirePermission(request, "Project.Write", { projectId });
+    sendJson(
+      response,
+      201,
+      await migrationExecutionService.rollback({
+        migrationName: requireString(body.migrationName, "migrationName"),
+        projectId,
+        provider: requireString(body.provider, "provider")
+      })
+    );
+    return;
+  }
+
+  if (pathname === "/api/migrations/status" && request.method === "GET") {
+    const projectId = requireString(url.searchParams.get("projectId"), "projectId");
+    await requirePermission(request, "Project.Read", { projectId });
+    sendJson(response, 200, await migrationExecutionService.history(projectId));
     return;
   }
 
@@ -419,6 +512,7 @@ async function routeRequest(request, response) {
     }
 
     const memberships = await rbacRepository.listProjectMembershipsForUser(context.user);
+    const organizationIds = await organizationMemberRepository.listOrganizationIdsForUser(context.user);
     const membershipByProject = new Map(
       memberships.map((membership) => [membership.projectId, membership])
     );
@@ -428,7 +522,7 @@ async function routeRequest(request, response) {
     sendJson(
       response,
       200,
-      projects.map((project) => {
+      projects.filter((project) => organizationIds.includes(project.organization_id)).map((project) => {
         const membership = membershipByProject.get(project.id);
         return {
           ...project,
@@ -443,12 +537,25 @@ async function routeRequest(request, response) {
   if (pathname === "/api/projects" && request.method === "POST") {
     const context = await requirePermission(request, "Project.Write");
     const body = await readJsonBody(request);
+    const organizationId = requireString(body.organization_id, "Organization id");
+    if (
+      !context.roles.includes("Super Admin") &&
+      !(await organizationMemberRepository.hasMembership(context.user, organizationId))
+    ) {
+      await rbacRepository.recordAuditEvent({
+        action: "Organization.AccessDenied",
+        user: context.user,
+        metadata: { organizationId, action: "CreateProject" }
+      });
+      throw new HttpError(403, "Organization membership is required to create a project.");
+    }
     const now = new Date().toISOString();
     const project = {
       ...body,
       id: requireString(body.id, "Project id"),
       name: requireString(body.name, "Project name"),
       slug: requireString(body.slug, "Project slug"),
+      organization_id: organizationId,
       storage_path: requireString(body.storage_path, "Storage path"),
       created_at: body.created_at ?? now,
       updated_at: body.updated_at ?? now,

@@ -1,6 +1,8 @@
 import { gcsStorageRepository } from "../repositories/gcsStorageRepository.mjs";
 import { rbacRepository } from "../repositories/rbacRepository.mjs";
 import { supabaseProjectRepository } from "../repositories/supabaseProjectRepository.mjs";
+import { transactionCoordinator } from "../transactions/TransactionCoordinator.mjs";
+import { TransactionStep } from "../transactions/TransactionStep.mjs";
 import { HttpError } from "../utils/http.mjs";
 
 export class ProjectDeletionService {
@@ -10,38 +12,58 @@ export class ProjectDeletionService {
       throw new HttpError(404, "Project could not be found.");
     }
 
-    await rbacRepository.recordAuditEvent({
-      action: "Project.DeleteStarted",
-      projectId,
-      user,
-      metadata: {
-        name: project.name,
-        storagePath: project.storage_path
-      }
-    });
-
-    await supabaseProjectRepository.updateProject(projectId, {
-      status: "deleting",
-      updated_at: new Date().toISOString()
-    });
-
     const storagePrefixes = uniqueStoragePrefixes(project);
-    const storageDeleted = {};
-    for (const prefix of storagePrefixes) {
-      storageDeleted[prefix] = await gcsStorageRepository.deletePrefix(prefix);
-    }
-
-    await rbacRepository.recordAuditEvent({
-      action: "Project.StorageDeleted",
+    const transaction = await transactionCoordinator.run({
+      name: "ProjectDelete",
       projectId,
       user,
-      metadata: {
-        prefixes: storagePrefixes,
-        deletedObjects: storageDeleted
-      }
+      metadata: { name: project.name, storagePath: project.storage_path },
+      steps: [
+        new TransactionStep({
+          name: "markDeleting",
+          execute: async () => {
+            await rbacRepository.recordAuditEvent({
+              action: "Project.DeleteStarted",
+              projectId,
+              user,
+              metadata: { name: project.name, storagePath: project.storage_path }
+            });
+            return supabaseProjectRepository.updateProject(projectId, {
+              status: "deleting",
+              updated_at: new Date().toISOString()
+            });
+          },
+          compensate: () =>
+            supabaseProjectRepository.updateProject(projectId, {
+              status: project.status ?? "active",
+              updated_at: new Date().toISOString()
+            })
+        }),
+        new TransactionStep({
+          name: "deleteStorage",
+          execute: async () => {
+            const storageDeleted = {};
+            for (const prefix of storagePrefixes) {
+              storageDeleted[prefix] = await gcsStorageRepository.deletePrefix(prefix);
+            }
+            await rbacRepository.recordAuditEvent({
+              action: "Project.StorageDeleted",
+              projectId,
+              user,
+              metadata: { prefixes: storagePrefixes, deletedObjects: storageDeleted }
+            });
+            return storageDeleted;
+          }
+        }),
+        new TransactionStep({
+          name: "deleteDatabase",
+          execute: () => supabaseProjectRepository.deleteProject(projectId)
+        })
+      ]
     });
 
-    const databaseDeleted = await supabaseProjectRepository.deleteProject(projectId);
+    const storageDeleted = transaction.results.deleteStorage;
+    const databaseDeleted = transaction.results.deleteDatabase;
 
     await rbacRepository.recordAuditEvent({
       action: "Project.DatabaseDeleted",

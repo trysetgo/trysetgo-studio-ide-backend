@@ -9,6 +9,7 @@ import { cloudRunRollbackService } from "./CloudRunRollbackService.mjs";
 import { containerBuildService } from "./ContainerBuildService.mjs";
 import { deploymentHealthService } from "./DeploymentHealthService.mjs";
 import { monitoringService } from "./MonitoringService.mjs";
+import { schemaVerificationService } from "../schema/SchemaVerificationService.mjs";
 
 export class DeploymentService {
   async deploy({ body, user }) {
@@ -25,6 +26,17 @@ export class DeploymentService {
     const target = plan.target ?? "Google Cloud Run";
     const serviceName = plan.cloudRunService ?? slug(applicationName);
     const imageTag = artifactRegistryService.getImageTag(applicationName, environment, version);
+    const schemaVerification = schemaVerificationService.verifyWorkspaceFiles({
+      files: workspaceFiles,
+      provider: plan.settings?.databaseType ?? "Supabase"
+    });
+    if (!schemaVerification.ok) {
+      throw new Error(
+        `Schema verification failed: ${schemaVerification.issues
+          .map((issue) => issue.message)
+          .join("; ")}`
+      );
+    }
     const record = await deploymentRepository.createDeployment({
       id: deploymentId,
       projectId,

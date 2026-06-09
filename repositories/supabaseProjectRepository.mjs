@@ -29,6 +29,7 @@ const projectScopedTables = [
   "api_metrics",
   "workflow_metrics",
   "deployment_metrics",
+  "migration_history",
   "monitoring_metrics",
   "alerts",
   "monitoring_alerts",

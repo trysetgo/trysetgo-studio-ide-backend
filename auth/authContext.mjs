@@ -1,5 +1,7 @@
 import { config } from "../config.mjs";
+import { organizationMemberRepository } from "../repositories/organizationMemberRepository.mjs";
 import { rbacRepository } from "../repositories/rbacRepository.mjs";
+import { supabaseProjectRepository } from "../repositories/supabaseProjectRepository.mjs";
 import { HttpError } from "../utils/http.mjs";
 
 export async function getAuthContext(request) {
@@ -79,6 +81,33 @@ async function getProjectAwareContext(request, projectId) {
 
   if (context.roles.includes("Super Admin")) {
     return context;
+  }
+
+  const project = await supabaseProjectRepository.getProject(projectId);
+  if (!project) {
+    return {
+      ...context,
+      roles: [],
+      permissions: []
+    };
+  }
+
+  const hasOrganizationMembership = await organizationMemberRepository.hasMembership(
+    context.user,
+    project.organization_id
+  );
+  if (!hasOrganizationMembership) {
+    await rbacRepository.recordAuditEvent({
+      action: "Organization.AccessDenied",
+      metadata: { organizationId: project.organization_id, projectId },
+      projectId,
+      user: context.user
+    });
+    return {
+      ...context,
+      roles: [],
+      permissions: []
+    };
   }
 
   const projectAccess = await rbacRepository.getProjectMemberAccess(
