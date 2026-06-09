@@ -8,8 +8,9 @@ import { cloudRunDeploymentService } from "./CloudRunDeploymentService.mjs";
 import { cloudRunRollbackService } from "./CloudRunRollbackService.mjs";
 import { containerBuildService } from "./ContainerBuildService.mjs";
 import { deploymentHealthService } from "./DeploymentHealthService.mjs";
+import { deploymentOperationsRepository } from "../repositories/deploymentOperationsRepository.mjs";
+import { deploymentValidationService } from "./DeploymentValidationService.mjs";
 import { monitoringService } from "./MonitoringService.mjs";
-import { schemaVerificationService } from "../schema/SchemaVerificationService.mjs";
 
 export class DeploymentService {
   async deploy({ body, user }) {
@@ -26,13 +27,11 @@ export class DeploymentService {
     const target = plan.target ?? "Google Cloud Run";
     const serviceName = plan.cloudRunService ?? slug(applicationName);
     const imageTag = artifactRegistryService.getImageTag(applicationName, environment, version);
-    const schemaVerification = schemaVerificationService.verifyWorkspaceFiles({
-      files: workspaceFiles,
-      provider: plan.settings?.databaseType ?? "Supabase"
-    });
-    if (!schemaVerification.ok) {
+    const validation = await deploymentValidationService.validate({ artifacts, files: workspaceFiles, plan: { ...plan, environment, target } });
+    if (!validation.ok) {
       throw new Error(
-        `Schema verification failed: ${schemaVerification.issues
+        `Deployment validation failed: ${validation.issues
+          .filter((issue) => issue.level === "error")
           .map((issue) => issue.message)
           .join("; ")}`
       );
@@ -51,8 +50,17 @@ export class DeploymentService {
       artifacts,
       imageTag
     });
+    await deploymentOperationsRepository.recordArtifacts({ deploymentId, projectId, artifacts });
+    await deploymentOperationsRepository.upsertEnvironment({
+      projectId,
+      name: environment,
+      status: "active",
+      variables: deploymentEnvVars(plan, applicationName, environment),
+      secrets: { references: deploymentSecrets(plan) }
+    });
 
     await this.log(projectId, deploymentId, "info", "Queued", "Deployment queued.", { user: user.email });
+    await this.log(projectId, deploymentId, "info", "Validate", "Deployment validation passed.", validation.summary);
     await rbacRepository.recordAuditEvent({
       action: "Deployment.Started",
       projectId,
@@ -112,6 +120,15 @@ export class DeploymentService {
         envVars: deploymentEnvVars(plan, applicationName, environment),
         secrets: deploymentSecrets(plan),
         onLog: (message, level) => this.log(projectId, deploymentId, level, "Deploying", message)
+      });
+      await deploymentOperationsRepository.recordRevision({
+        deploymentId,
+        projectId,
+        environment,
+        imageTag,
+        revisionName: deployed.revision ?? null,
+        trafficPercent: 100,
+        status: "active"
       });
 
       const health = await deploymentHealthService.check(deployed.url);
@@ -237,6 +254,15 @@ export class DeploymentService {
       secrets: deploymentSecrets(deployment.plan),
       onLog: (message, level) => this.log(deployment.projectId, deploymentId, level, "Deploying", message)
     });
+    await deploymentOperationsRepository.recordRevision({
+      deploymentId,
+      projectId: deployment.projectId,
+      environment: deployment.environment,
+      imageTag: previous.imageTag,
+      revisionName: null,
+      trafficPercent: 100,
+      status: "rollback"
+    });
     await deploymentRepository.updateDeployment(deploymentId, {
       status: "Succeeded",
       imageTag: previous.imageTag,
@@ -300,6 +326,15 @@ export class DeploymentService {
       envVars: deploymentEnvVars(deployment.plan, deployment.plan?.applicationName ?? "trysetgo-app", targetEnvironment),
       secrets: deploymentSecrets(deployment.plan),
       onLog: (message, level) => this.log(deployment.projectId, promotedId, level, "Deploying", message)
+    });
+    await deploymentOperationsRepository.recordRevision({
+      deploymentId: promotedId,
+      projectId: deployment.projectId,
+      environment: targetEnvironment,
+      imageTag: deployment.imageTag,
+      revisionName: deployed.revision ?? null,
+      trafficPercent: 100,
+      status: "promoted"
     });
     const health = await deploymentHealthService.check(deployed.url);
     const completed = await deploymentRepository.updateDeployment(promotedId, {

@@ -25,6 +25,9 @@ const projectScopedTables = [
   "project_presence",
   "deployment_logs",
   "deployments",
+  "deployment_artifacts",
+  "deployment_environments",
+  "deployment_revisions",
   "application_metrics",
   "api_metrics",
   "workflow_metrics",
@@ -35,6 +38,8 @@ const projectScopedTables = [
   "monitoring_alerts",
   "package_installs",
   "git_connections",
+  "alert_channels",
+  "backup_jobs",
   "audit_logs"
 ];
 

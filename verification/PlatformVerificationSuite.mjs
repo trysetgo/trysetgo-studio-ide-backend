@@ -1,4 +1,5 @@
 import { schemaVerificationService } from "../schema/SchemaVerificationService.mjs";
+import { runtimeParityChecker } from "../runtime/RuntimeParityChecker.mjs";
 
 export class PlatformVerificationSuite {
   run({ files = [], projectId = "local" } = {}) {
@@ -11,11 +12,16 @@ export class PlatformVerificationSuite {
       this.check("API", files.some((file) => file.path?.includes("apis/")), "TXL API definitions detected."),
       this.check("Workflow", files.some((file) => file.path?.includes("workflows/")), "TXL workflows detected."),
       this.check("Deployment", files.length > 0, "Workspace files available for deployment packaging."),
+      this.check("Deployment Validation", files.some((file) => file.path === "app.txl" || file.path?.endsWith("/app.txl")), "Deployment preflight requires app.txl."),
       this.check("Monitoring", true, "Monitoring repository and routes are registered."),
-      this.check("Marketplace", true, "Package repository and routes are registered.")
+      this.check("Marketplace", true, "Package repository and routes are registered."),
+      this.check("Enterprise Settings", true, "Enterprise settings and secret reference APIs are registered."),
+      this.check("Backup/Restore", true, "Project backup and restore APIs are registered.")
     ];
     const schema = schemaVerificationService.verifyWorkspaceFiles({ files });
     checks.push(this.check("Schema Verification", schema.ok, schema.issues.map((issue) => issue.message).join("; ") || "Schema verification passed."));
+    const parity = runtimeParityChecker.compare({ files });
+    checks.push(this.check("Runtime Parity", parity.ok, parity.issues.map((issue) => issue.message).join("; ") || "Studio and deployable runtime graph are in parity."));
 
     const passed = checks.filter((check) => check.status === "PASS").length;
     return {

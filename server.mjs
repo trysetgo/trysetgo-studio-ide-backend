@@ -8,10 +8,15 @@ import { aiWorkspaceAgentPlannerService } from "./services/AIWorkspaceAgentPlann
 import { authService } from "./services/authService.mjs";
 import { deploymentService } from "./services/DeploymentService.mjs";
 import { environmentPromotionService } from "./services/EnvironmentPromotionService.mjs";
+import { backupRecoveryService } from "./enterprise/BackupRecoveryService.mjs";
+import { deploymentOperationsRepository } from "./repositories/deploymentOperationsRepository.mjs";
+import { enterpriseSettingsService } from "./enterprise/EnterpriseSettingsService.mjs";
 import { gitService } from "./services/GitService.mjs";
 import { monitoringService } from "./services/MonitoringService.mjs";
 import { projectAdminService } from "./services/ProjectAdminService.mjs";
 import { projectDeletionService } from "./services/ProjectDeletionService.mjs";
+import { runtimeVerificationService } from "./runtime/RuntimeVerificationService.mjs";
+import { secretReferenceService } from "./enterprise/SecretReferenceService.mjs";
 import { migrationExecutionService } from "./schema/MigrationExecutionService.mjs";
 import { schemaVerificationService } from "./schema/SchemaVerificationService.mjs";
 import { platformVerificationSuite } from "./verification/PlatformVerificationSuite.mjs";
@@ -174,6 +179,32 @@ async function routeRequest(request, response) {
     }
     await requirePermission(request, "Project.Read", { projectId: status.deployment.projectId });
     sendJson(response, 200, status);
+    return;
+  }
+
+  const deploymentArtifactsMatch = pathname.match(/^\/api\/deployments\/([^/]+)\/artifacts$/);
+  if (deploymentArtifactsMatch && request.method === "GET") {
+    const status = await deploymentService.status(deploymentArtifactsMatch[1]);
+    if (!status.deployment) {
+      throw new HttpError(404, "Deployment could not be found.");
+    }
+    await requirePermission(request, "Project.Read", { projectId: status.deployment.projectId });
+    sendJson(response, 200, {
+      artifacts: await deploymentOperationsRepository.listArtifacts(deploymentArtifactsMatch[1])
+    });
+    return;
+  }
+
+  const deploymentRevisionsMatch = pathname.match(/^\/api\/deployments\/([^/]+)\/revisions$/);
+  if (deploymentRevisionsMatch && request.method === "GET") {
+    const status = await deploymentService.status(deploymentRevisionsMatch[1]);
+    if (!status.deployment) {
+      throw new HttpError(404, "Deployment could not be found.");
+    }
+    await requirePermission(request, "Project.Read", { projectId: status.deployment.projectId });
+    sendJson(response, 200, {
+      revisions: await deploymentOperationsRepository.listRevisions(deploymentRevisionsMatch[1])
+    });
     return;
   }
 
@@ -364,6 +395,21 @@ async function routeRequest(request, response) {
     return;
   }
 
+  if (pathname === "/api/runtime/verify" && request.method === "POST") {
+    const body = await readJsonBody(request, 5 * 1024 * 1024);
+    const projectId = requireString(body.projectId, "projectId");
+    await requirePermission(request, "Project.Read", { projectId });
+    sendJson(
+      response,
+      200,
+      await runtimeVerificationService.verify({
+        files: Array.isArray(body.files) ? body.files : [],
+        provider: typeof body.provider === "string" ? body.provider : "Memory"
+      })
+    );
+    return;
+  }
+
   if (pathname === "/api/verify" && request.method === "POST") {
     const body = await readJsonBody(request, 5 * 1024 * 1024);
     const projectId = requireString(body.projectId, "projectId");
@@ -416,6 +462,95 @@ async function routeRequest(request, response) {
     const projectId = requireString(url.searchParams.get("projectId"), "projectId");
     await requirePermission(request, "Project.Read", { projectId });
     sendJson(response, 200, await migrationExecutionService.history(projectId));
+    return;
+  }
+
+  if (pathname === "/api/enterprise/settings" && request.method === "GET") {
+    const organizationId = requireString(url.searchParams.get("organizationId"), "organizationId");
+    await requirePermission(request, "Project.Read");
+    sendJson(
+      response,
+      200,
+      await enterpriseSettingsService.get({
+        organizationId,
+        category: url.searchParams.get("category") ?? undefined
+      })
+    );
+    return;
+  }
+
+  if (pathname === "/api/enterprise/settings" && request.method === "POST") {
+    const context = await requirePermission(request, "Project.Write");
+    const body = await readJsonBody(request);
+    sendJson(
+      response,
+      201,
+      await enterpriseSettingsService.upsert({
+        organizationId: requireString(body.organizationId, "organizationId"),
+        category: requireString(body.category, "category"),
+        settings: body.settings,
+        user: context.user
+      })
+    );
+    return;
+  }
+
+  if (pathname === "/api/secrets/references" && request.method === "GET") {
+    const organizationId = requireString(url.searchParams.get("organizationId"), "organizationId");
+    await requirePermission(request, "Project.Read");
+    sendJson(response, 200, await secretReferenceService.list({ organizationId }));
+    return;
+  }
+
+  if (pathname === "/api/secrets/references" && request.method === "POST") {
+    const context = await requirePermission(request, "Project.Write");
+    const body = await readJsonBody(request);
+    sendJson(
+      response,
+      201,
+      await secretReferenceService.create({
+        organizationId: requireString(body.organizationId, "organizationId"),
+        provider: requireString(body.provider, "provider"),
+        name: requireString(body.name, "name"),
+        reference: requireString(body.reference, "reference"),
+        metadata: body.metadata,
+        user: context.user
+      })
+    );
+    return;
+  }
+
+  const backupMatch = pathname.match(/^\/api\/backups\/projects\/([^/]+)$/);
+  if (backupMatch && request.method === "POST") {
+    const projectId = backupMatch[1];
+    const context = await requirePermission(request, "Project.Read", { projectId });
+    const body = await readJsonBody(request).catch(() => ({}));
+    sendJson(
+      response,
+      201,
+      await backupRecoveryService.createProjectBackup({
+        projectId,
+        reason: typeof body.reason === "string" ? body.reason : "manual",
+        user: context.user
+      })
+    );
+    return;
+  }
+
+  const restoreMatch = pathname.match(/^\/api\/backups\/projects\/([^/]+)\/restore$/);
+  if (restoreMatch && request.method === "POST") {
+    const projectId = restoreMatch[1];
+    const context = await requirePermission(request, "Project.Write", { projectId });
+    const body = await readJsonBody(request);
+    sendJson(
+      response,
+      200,
+      await backupRecoveryService.restoreProjectBackup({
+        projectId,
+        backupPath: requireString(body.backupPath, "backupPath"),
+        user: context.user
+      })
+    );
     return;
   }
 
