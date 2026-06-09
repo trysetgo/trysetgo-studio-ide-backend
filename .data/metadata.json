@@ -1,0 +1,35 @@
+{
+  "projects": [
+    {
+      "organization_id": "00000000-0000-4000-8000-000000000001",
+      "slug": "smoke-b5784070",
+      "id": "b5784070-12d4-4c68-8ba7-6cd73e9df259",
+      "template": "Blank",
+      "description": "Smoke test",
+      "storage_path": "projects/b5784070-12d4-4c68-8ba7-6cd73e9df259/",
+      "name": "SmokeProject",
+      "theme": "Modern",
+      "status": "active",
+      "project_type": "Website",
+      "created_by": "00000000-0000-4000-8000-000000000002",
+      "created_at": "2026-06-06T14:31:27.813Z",
+      "updated_at": "2026-06-06T14:31:27.813Z"
+    },
+    {
+      "id": "217381bf-5182-4147-ad06-e47b048012d5",
+      "organization_id": "00000000-0000-4000-8000-000000000001",
+      "name": "EcommerceSite",
+      "slug": "ecommerce-site",
+      "description": null,
+      "project_type": "Website",
+      "template": "Blank",
+      "theme": "Modern",
+      "status": "active",
+      "storage_path": "projects/217381bf-5182-4147-ad06-e47b048012d5/",
+      "created_by": "00000000-0000-4000-8000-000000000002",
+      "created_at": "2026-06-06T15:33:37.363Z",
+      "updated_at": "2026-06-06T15:33:37.363Z"
+    }
+  ],
+  "project_versions": []
+}
